@@ -3,9 +3,11 @@ import pyautogui
 import time
 import threading
 import json5
+import os
 
 # 读取配置文件
-with open('res/hs_tap_cfg.json', 'r') as f:
+print("当前工作目录:", os.getcwd())
+with open('./res/hs_tap_cfg.json', 'r') as f:
     hs_tap_cfg = json5.load(f)
 
 
