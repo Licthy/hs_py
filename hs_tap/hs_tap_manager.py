@@ -7,15 +7,16 @@ import os
 
 # 读取配置文件
 print("当前工作目录:", os.getcwd())
-with open('./res/hs_tap_cfg.json', 'r') as f:
+
+with open("./res/hs_tap_cfg.json", "r") as f:
     hs_tap_cfg = json5.load(f)
 
 
 # 找到图片并点击
 def click_res(res):
     label2.config(text=res)
-    for i in range(hs_tap_cfg['one_pic_max_times']):
-        time.sleep(hs_tap_cfg['one_pic_cd'])
+    for i in range(hs_tap_cfg["one_pic_max_times"]):
+        time.sleep(hs_tap_cfg["one_pic_cd"])
         png_center = pyautogui.locateCenterOnScreen(res, confidence=0.90)
         if png_center is not None:
             pyautogui.click(png_center)
@@ -27,10 +28,10 @@ def click_res(res):
 
 # 循环找图
 def for_res():
-    for element in hs_tap_cfg['png_res']:
+    for element in hs_tap_cfg["png_res"]:
         click_res(element)
         pyautogui.moveTo(x=0, y=100)
-        time.sleep(hs_tap_cfg['diff_pic_cd'])
+        time.sleep(hs_tap_cfg["diff_pic_cd"])
 
 
 # 主方法
@@ -46,7 +47,7 @@ def main_run():
 root = tk.Tk()
 root.title("二师兄")
 # 置顶
-root.attributes('-topmost', True)
+root.attributes("-topmost", True)
 
 # 调整窗口的宽度和高度
 window_width = 500

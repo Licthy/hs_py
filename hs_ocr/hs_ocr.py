@@ -8,7 +8,7 @@ import logging
 from configparser import ConfigParser
 
 # 配置文件路径常量
-CONFIG_FILE_PATH = '../cfg/config.ini'
+CONFIG_FILE_PATH = './cfg/config.ini'
 
 # 配置日志记录器
 logging.basicConfig(
@@ -34,7 +34,7 @@ def load_config():
             'confidence_threshold': 0.9,
             'check_interval': 1
         }
-        with open(CONFIG_FILE_PATH, 'w') as f:
+        with open(CONFIG_FILE_PATH, 'w',encoding='utf-8') as f:
             config.write(f)
     return config['DEFAULT']
 
