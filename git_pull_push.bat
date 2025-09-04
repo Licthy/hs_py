@@ -10,7 +10,7 @@ rem 拉取远程更新
 echo 正在拉取最新代码...
 git pull
 if !errorlevel! neq 0 (
-    echo 拉取失败，请检查网络连接或远程仓库状态
+    echo 检查网络 或者 有报错信息
     goto :end
 )
 
