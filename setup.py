@@ -12,18 +12,18 @@ if sys.platform == "win32":
 # 可执行文件的设置
 executables = [
     Executable(
-        './hs_start_exe/hs_start_exe.py',  # 主脚本文件
+        './hs_send_file_app/send_file_app.py',  # 主脚本文件
         base=base,
-        target_name='hs_start_app',  # 可执行文件名称
+        target_name='hs_send_file_app',  # 可执行文件名称
         icon="my_icon.ico"
     )
 ]
 
 # 打包设置
 setup(
-    name='hs_start_app',
+    name='hs_send_file_app',
     version='1.0',
-    description='一键启动多个应用程序',
+    description='自动发送文件',
     executables=executables,
     options={
         'build_exe': {
