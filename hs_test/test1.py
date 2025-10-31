@@ -1,186 +1,190 @@
-import os
-import json
-import logging
+import tkinter as tk
+from tkinter import ttk, messagebox
+import pyperclip
+import threading
 import time
-from typing import List, Dict, Tuple, Optional
-from PIL import ImageGrab
+import logging
 import pyautogui
-import cv2
-import numpy as np
-from dataclasses import dataclass, asdict
+
+
+
+from pystray import Icon, MenuItem as item
+from PIL import Image, ImageDraw
+from pynput import keyboard  # 替换为pynput库
 
 # 配置日志
 logging.basicConfig(
+    filename='text_converter.log',
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('autoclicker.log'), logging.StreamHandler()]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-
-@dataclass
-class ImageConfig:
-    """图片配置项"""
-    name: str
-    path: str
-    grayscale: bool = False
-    threshold: float = 0.8
-    relative_click: Tuple[int, int] = (0, 0)
-    max_attempts: int = 3
-    skip_after_fails: int = 2
-    execute_count: int = -1  # -1表示无限次
+# 全局变量
+is_hidden = False
+listener_thread = None  # 快捷键监听线程
+heartbeat_flag = False  # 线程心跳标记
+last_run_time = 0 #最后的执行时间
 
 
-@dataclass
-class Config:
-    """主配置类"""
-    images: List[ImageConfig]
-    loop_delay: float = 1.0
-    click_delay: float = 0.5
+def convert_text():
+    """文本转换逻辑（保持不变）"""
+    try:
+        global last_run_time
+        now_time = int(time.time() * 1000)
+        if  now_time-last_run_time>200:
+            last_run_time=now_time
+            pyautogui.hotkey('ctrl', 'c')
+            clipboard_text = pyperclip.paste()
+            if not clipboard_text:
+                logging.info("转换失败：剪贴板为空")
+                return
+            
+            processed_text = clipboard_text.strip('"').strip()
+            parts = [part.strip() for part in processed_text.split(',') if part.strip()]
+            
+            if not parts:
+                logging.info(f"转换失败：无效内容 - {clipboard_text}")
+                return
+            
+            converted_parts = [f'{{"{part}",{part}}}' for part in parts]
+            result = ','.join(converted_parts)
+            
+            pyperclip.copy(result)
+            pyautogui.hotkey('ctrl', 'v')
+            logging.info(f"转换成功：{clipboard_text} → {result}")
+        
+    except Exception as e:
+        error_msg = f"转换失败：{str(e)}"
+        logging.error(error_msg, exc_info=True)
 
 
-class ImageAutoClicker:
-    """图像自动点击器"""
+def on_hotkey_press():
+    """快捷键触发的函数（供pynput调用）"""
+    global heartbeat_flag
+    heartbeat_flag = True  # 触发时更新心跳标记
+    convert_text()
 
-    def __init__(self, config_path: str):
-        self.config = self._load_config(config_path)
-        self.current_counts = {img.name: 0 for img in self.config.images}
-        self.fail_counts = {img.name: 0 for img in self.config.images}
-        pyautogui.FAILSAFE = True  # 启用安全特性，鼠标移动到左上角可终止程序
 
-    def _load_config(self, config_path: str) -> Config:
-        """加载配置文件"""
+def pynput_listener():
+    """使用pynput监听Ctrl+F1快捷键"""
+    global heartbeat_flag
+    # 定义快捷键：Ctrl+F1
+    hotkey = keyboard.GlobalHotKeys({
+        '<ctrl>+<f1>': on_hotkey_press
+    })
+    
+    while True:  # 循环确保监听失效后重启
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
-
-            images = []
-            for img_data in config_data.get('images', []):
-                img = ImageConfig(
-                    name=img_data['name'],
-                    path=img_data['path'],
-                    grayscale=img_data.get('grayscale', False),
-                    threshold=img_data.get('threshold', 0.8),
-                    relative_click=tuple(img_data.get('relative_click', [0, 0])),
-                    max_attempts=img_data.get('max_attempts', 3),
-                    skip_after_fails=img_data.get('skip_after_fails', 2),
-                    execute_count=img_data.get('execute_count', -1)
-                )
-                images.append(img)
-
-            return Config(
-                images=images,
-                loop_delay=config_data.get('loop_delay', 1.0),
-                click_delay=config_data.get('click_delay', 0.5)
-            )
+            logging.info("pynput快捷键监听启动")
+            heartbeat_flag = True  # 初始心跳标记
+            with hotkey:
+                hotkey.join()  # 阻塞监听（pynput的监听方式）
         except Exception as e:
-            logging.error(f"加载配置文件失败: {e}")
-            raise
+            logging.error(f"pynput监听异常，5秒后重启：{str(e)}", exc_info=True)
+            time.sleep(5)
+        finally:
+            hotkey.stop()  # 停止当前监听
 
-    def _locate_image(self, template_path: str, grayscale: bool, threshold: float) -> Optional[Tuple[int, int]]:
-        """在屏幕上查找图像"""
-        try:
-            # 加载模板图像
-            template = cv2.imread(template_path, cv2.IMREAD_COLOR)
-            if template is None:
-                logging.error(f"无法加载模板图像: {template_path}")
-                return None
 
-            if grayscale:
-                template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+def heartbeat_checker():
+    """心跳检测线程：定期检查监听线程是否存活，失效则重启"""
+    global heartbeat_flag, listener_thread
+    while True:
+        time.sleep(60)  # 每60秒检查一次
+        # 检查条件：监听线程未运行 或 60秒内无心跳（未触发过快捷键且未响应）
+        if (listener_thread is None or not listener_thread.is_alive()) or not heartbeat_flag:
+            logging.warning("监听线程无响应，尝试重启...")
+            # 强制终止旧线程（如果存在）
+            if listener_thread and listener_thread.is_alive():
+                # pynput的线程无法直接终止，通过重新创建线程覆盖
+                pass
+            # 启动新的监听线程
+            start_listener_thread()
+        # 重置心跳标记（等待下一次检查）
+        heartbeat_flag = False
 
-            # 获取屏幕截图
-            screenshot = ImageGrab.grab()
-            screenshot_np = np.array(screenshot)
-            screenshot_cv = cv2.cvtColor(screenshot_np, cv2.COLOR_RGB2BGR)
 
-            if grayscale:
-                screenshot_cv = cv2.cvtColor(screenshot_cv, cv2.COLOR_BGR2GRAY)
+def start_listener_thread():
+    """启动pynput监听线程"""
+    global listener_thread
+    listener_thread = threading.Thread(target=pynput_listener, daemon=True)
+    listener_thread.start()
+    logging.info("已启动pynput快捷键监听线程")
 
-            # 模板匹配
-            result = cv2.matchTemplate(screenshot_cv, template, cv2.TM_CCOEFF_NORMED)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
 
-            if max_val >= threshold:
-                h, w = template.shape[:2]
-                top_left = max_loc
-                center = (top_left[0] + w // 2, top_left[1] + h // 2)
-                return center
-            else:
-                return None
-        except Exception as e:
-            logging.error(f"图像识别过程中出错: {e}")
-            return None
+def create_tray_icon(window):
+    """系统托盘（保持不变）"""
+    def create_image():
+        width = 64
+        height = 64
+        image = Image.new('RGB', (width, height), color='white')
+        draw = ImageDraw.Draw(image)
+        draw.text((15, 10), "T", font_size=40, fill='black')
+        return image
 
-    def _click_position(self, position: Tuple[int, int], relative: Tuple[int, int]) -> None:
-        """点击指定位置"""
-        x = position[0] + relative[0]
-        y = position[1] + relative[1]
-        pyautogui.click(x, y)
-        logging.info(f"点击位置: ({x}, {y})")
+    def on_tray_click(icon, item):
+        global is_hidden
+        if not is_hidden:
+            return
+        is_hidden = False
+        window.deiconify()
+        icon.stop()
 
-    def run(self) -> None:
-        """运行自动点击器"""
-        logging.info("自动点击器已启动")
-        try:
-            while True:
-                all_done = True
+    def on_exit(icon, item):
+        icon.stop()
+        window.destroy()
+        logging.info("程序正常退出")
+        exit()
 
-                for img_config in self.config.images:
-                    # 检查是否达到执行次数上限
-                    if img_config.execute_count >= 0 and self.current_counts[
-                        img_config.name] >= img_config.execute_count:
-                        logging.debug(f"{img_config.name} 已达到执行次数上限")
-                        continue
+    menu = (item('退出', on_exit),)
+    icon = Icon("TextConverter", create_image(), "文本转换工具", menu)
+    threading.Thread(target=icon.run, daemon=True).start()
+    return icon
 
-                    # 检查是否达到失败跳过次数
-                    if self.fail_counts[img_config.name] >= img_config.skip_after_fails:
-                        logging.info(f"{img_config.name} 已达到失败跳过次数，跳过此次检查")
-                        self.fail_counts[img_config.name] = 0
-                        continue
 
-                    all_done = False
+def minimize_to_tray(window):
+    global is_hidden
+    is_hidden = True
+    window.withdraw()
+    create_tray_icon(window)
 
-                    # 尝试查找图像
-                    position = None
-                    for attempt in range(img_config.max_attempts):
-                        position = self._locate_image(
-                            img_config.path,
-                            img_config.grayscale,
-                            img_config.threshold
-                        )
 
-                        if position:
-                            logging.info(f"找到图像 {img_config.name}，相似度: {img_config.threshold}")
-                            self._click_position(position, img_config.relative_click)
-                            self.current_counts[img_config.name] += 1
-                            self.fail_counts[img_config.name] = 0
-                            time.sleep(self.config.click_delay)
-                            break
-                        else:
-                            logging.info(f"尝试 {attempt + 1}/{img_config.max_attempts}: 未找到图像 {img_config.name}")
-                            time.sleep(0.5)
+def main_window():
+    window = tk.Tk()
+    window.title("ConvertText")
+    window.geometry("400x200")
+    window.resizable(False, False)
 
-                    if not position:
-                        self.fail_counts[img_config.name] += 1
-                        logging.warning(
-                            f"未找到图像 {img_config.name}，失败次数: {self.fail_counts[img_config.name]}/{img_config.skip_after_fails}")
+    def on_minimize(event):
+        if window.state() == 'iconic':
+            minimize_to_tray(window)
+    window.bind("<Unmap>", on_minimize)
 
-                # 如果所有图像都达到执行次数上限，退出循环
-                if all_done:
-                    logging.info("所有图像都已达到执行次数上限，程序退出")
-                    break
+    ttk.Label(
+        window,
+        text="按下 Ctrl+F1 执行文本转换\n\n格式要求： AAA,BBB,CCC（可带引号或空格）\n",
+        justify="left",
+        font=("微软雅黑", 10)
+    ).pack(padx=20, pady=30)
 
-                # 循环延迟
-                logging.debug(f"循环结束，等待 {self.config.loop_delay} 秒")
-                time.sleep(self.config.loop_delay)
+    frame = ttk.Frame(window)
+    frame.pack(pady=10)
+    ttk.Button(frame, text="退出", command=window.destroy).pack(side="right", padx=10)
+    ttk.Button(frame, text="转换（Ctrl+F1）", command=convert_text).pack(side="right")
 
-        except KeyboardInterrupt:
-            logging.info("用户手动终止程序")
-        except Exception as e:
-            logging.error(f"程序运行过程中出错: {e}")
+    # 启动核心线程：监听线程 + 心跳检测线程
+    start_listener_thread()
+    threading.Thread(target=heartbeat_checker, daemon=True).start()
+    logging.info("心跳检测线程启动")
+
+    def on_close():
+        window.destroy()
+        logging.info("窗口关闭，程序退出")
+    window.protocol("WM_DELETE_WINDOW", on_close)
+
+    window.mainloop()
 
 
 if __name__ == "__main__":
-    config_path = "config.json"
-    clicker = ImageAutoClicker(config_path)
-    clicker.run()
+    logging.info("程序启动")
+    main_window()
