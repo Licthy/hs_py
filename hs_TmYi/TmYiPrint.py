@@ -45,7 +45,7 @@ def calc_year_sum(birth_year, gender):
     return final_gua
 
 
-for year in range(1980, 2021):
+for year in range(2000, 2030):
     print(
         f"{year}男：{calc_year_sum(year, '男')}；{year}女：{calc_year_sum(year, '女')}"
     )
