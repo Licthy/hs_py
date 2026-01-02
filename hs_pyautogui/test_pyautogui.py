@@ -1,47 +1,46 @@
-import cv2
-import numpy as np
 import pyautogui
+import time
 
-# 定义要查找的绿色范围
-lower_green = np.array([8, 180, 52])  # HSV颜色空间中的下界
-upper_green = np.array([8, 210, 52])  # HSV颜色空间中的上界
 
-while True:
-    # 截取屏幕截图
-    screenshot = pyautogui.screenshot()
+def click_image(target_image_path):
+    """
+    精准匹配图片并点击（无需OpenCV）
+    :param target_image_path: 目标图片的路径
+    :return: 找到并点击返回True，未找到返回False
+    """
+    try:
+        # 移除confidence参数，使用默认精准匹配
+        image_position = pyautogui.locateOnScreen(target_image_path, grayscale=False)
 
-    # 转换截图为OpenCV图像
-    frame = np.array(screenshot)
-    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if not image_position:
+            return False
 
-    # 将图像从RGB转换为HSV颜色空间
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # 点击图片中心
+        center_x, center_y = pyautogui.center(image_position)
+        pyautogui.moveTo(center_x, center_y, duration=0.1)
+        pyautogui.click(center_x, center_y)
+        print(f"成功点击！位置：({center_x}, {center_y})")
+        return True
 
-    # 创建掩码，检测绿色区域
-    mask = cv2.inRange(hsv, lower_green, upper_green)
+    except Exception as e:
+        print(f"单次操作异常：{str(e)}")
+        return False
 
-    # 寻找绿色区域的轮廓
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 如果找到绿色区域，点击第一个找到的区域
-    if contours:
-        # 获取第一个轮廓的中心点坐标
-        M = cv2.moments(contours[0])
-        print(M)
-        if M["m00"] > 0:
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
+# ------------------- 循环执行逻辑 -------------------
+if __name__ == "__main__":
+    # 配置参数
+    target_image = "tiug.png"  # 替换为你的目标图片路径
+    total_run_time = 20  # 总循环时长（秒）
+    interval = 0.5  # 每次操作间隔（秒）
 
-            # 模拟鼠标点击
-            pyautogui.click(cx, cy)
+    # 记录循环开始时间
+    start_time = time.time()
+    print(f"开始循环执行（总时长{total_run_time}秒，间隔{interval}秒）...")
 
-    # 显示原始图像和掩码图像（用于调试）
-    # cv2.imshow("Original", frame)
-    # cv2.imshow("Mask", mask)
+    # 循环执行，直到达到总时长
+    while (time.time() - start_time) < total_run_time:
+        click_image(target_image)
+        time.sleep(interval)
 
-    # 按'q'键退出循环
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# 关闭所有窗口
-cv2.destroyAllWindows()
+    print(f"循环结束！已执行{total_run_time}秒，停止操作。")
