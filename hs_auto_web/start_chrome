@@ -1,0 +1,8 @@
+# 1. 强制关闭所有Chrome进程（必须！否则旧进程会占用端口）
+taskkill /f /im chrome.exe
+
+# 2. 创建目录（确保存在）
+mkdir D:\ChromeDebugProfile -Force
+
+# 3. 启动调试模式Chrome（复制完整命令，不要改格式）
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="D:\ChromeDebugProfile"
