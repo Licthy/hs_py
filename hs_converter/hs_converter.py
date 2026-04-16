@@ -13,7 +13,7 @@ from pynput import keyboard
 # -------------------------- 配置与全局变量 --------------------------
 # 日志配置（记录运行状态和错误）
 logging.basicConfig(
-    filename='text_converter.log',
+    filename='./hs.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -50,7 +50,7 @@ def convert_text():
                 return
             
             # 转换格式并复制到剪贴板
-            converted_parts = [f'{{"{part}",{part}}}' for part in parts]
+            converted_parts = [f"{{'{part}',{part}}}" for part in parts]
             result = ','.join(converted_parts)
             pyperclip.copy(result)
             

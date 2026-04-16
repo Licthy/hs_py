@@ -1,93 +1,84 @@
 import tkinter as tk
-from tkinter import messagebox
+import pyautogui
+import threading
+import time
 
+# ---------------------- 配置参数 ----------------------
+POINT_SIZE = 5       # 点的大小
+UPDATE_INTERVAL = 0.05
+CHECK_RANGE = 5
+# ------------------------------------------------------
 
-def calc(sum_value, gender):
-    sum_value1 = 11 - sum_value if gender == "男" else 4 + sum_value
-    if sum_value1 > 9 and sum_value1 > 0:
-        sum_value1 = calc(sum_value - 9, gender)
-    elif sum_value1 < 0:
-        sum_value1 = calc(sum_value - 9, gender)
+class AdaptivePoint:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.overrideredirect(True)
+        self.root.attributes('-topmost', True)
+        self.root.attributes('-toolwindow', True)
 
-    # 如果等于5，那么判定性别
-    if sum_value1 == 5:
-        sum_value1 = 2 if gender == "男" else 8
+        # 关键：透明背景
+        self.root.attributes('-transparentcolor', 'white')
 
-    return sum_value1
+        self.window_size = POINT_SIZE
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - self.window_size) // 2
+        y = (screen_height - self.window_size) // 2
+        self.root.geometry(f"{self.window_size}x{self.window_size}+{x}+{y}")
 
+        # 背景设为 white，会被自动透明掉
+        self.canvas = tk.Canvas(
+            self.root,
+            width=self.window_size,
+            height=self.window_size,
+            bg="white",
+            highlightthickness=0
+        )
+        self.canvas.pack()
 
-def calculate_e():
-    """核心计算函数，按照规则计算最终结果，并打印/显示过程值"""
-    # 获取输入的出生年份
-    year_input = entry_year.get().strip()
-    # 获取选中的性别
-    gender = var_gender.get()
+        self.point = self.canvas.create_oval(
+            1, 1,
+            self.window_size - 1,
+            self.window_size - 1,
+            fill="red"
+        )
 
-    # 输入验证：确保年份是四位数的数字
-    try:
-        birth_year = int(year_input)
-        if not (1000 <= birth_year <= 9999):
-            messagebox.showerror("输入错误", "请输入四位数的出生年份（如1994）！")
-            return
-    except ValueError:
-        messagebox.showerror("输入错误", "年份必须是数字，请重新输入！")
-        return
+        self.root.bind("<Escape>", self.quit_app)
+        self.root.bind("<Control-q>", self.quit_app)
 
-    # 步骤1：拆分年份各位数字求和得到A
-    digits = [int(d) for d in str(birth_year)]
-    sum_value = sum(digits)
-    reply = calc(sum_value, gender)
+        self.running = True
+        self.color_thread = threading.Thread(target=self.update_color_loop, daemon=True)
+        self.color_thread.start()
 
-    # ========== 2. 界面显示过程值（直观查看） ==========
-    process_text = (
-        f"男用11减，女用4加，5的时候男转2女转8\n"
-        f"出生年份：{birth_year} 和：{sum_value}\n"
-        f"性别：{gender}\n"
-        f"结果：{reply}"
-    )
-    # 清空原有内容并插入新的过程值
-    text_process.delete(1.0, tk.END)
-    text_process.insert(tk.END, process_text)
+    def get_background_brightness(self, x, y):
+        total = 0
+        count = 0
+        for dx in range(-CHECK_RANGE, CHECK_RANGE + 1):
+            for dy in range(-CHECK_RANGE, CHECK_RANGE + 1):
+                try:
+                    r, g, b = pyautogui.pixel(x + dx, y + dy)
+                    total += 0.299*r + 0.587*g + 0.114*b
+                    count += 1
+                except:
+                    continue
+        return total / count if count else 128
 
-    # 显示最终结果
-    label_result.config(text=f"结果：{reply}")
+    def update_color_loop(self):
+        while self.running:
+            x = self.root.winfo_rootx() + self.window_size // 2
+            y = self.root.winfo_rooty() + self.window_size // 2
+            bright = self.get_background_brightness(x, y)
+            color = "black" if bright > 127 else "white"
+            self.canvas.itemconfig(self.point, fill=color)
+            time.sleep(UPDATE_INTERVAL)
 
+    def quit_app(self, event=None):
+        self.running = False
+        self.root.destroy()
 
-# 创建主窗口
-root = tk.Tk()
-root.title("出生年份计算工具")
-root.geometry("500x400")  # 扩大窗口以容纳过程显示区域
+    def run(self):
+        self.root.mainloop()
 
-# 1. 出生年份输入区域
-frame_year = tk.Frame(root)
-frame_year.pack(pady=10)
-label_year = tk.Label(frame_year, text="出生年份（四位数）：")
-label_year.pack(side=tk.LEFT, padx=5)
-entry_year = tk.Entry(frame_year, width=20)
-entry_year.pack(side=tk.LEFT)
-
-# 2. 性别选择区域
-frame_gender = tk.Frame(root)
-frame_gender.pack(pady=5)
-var_gender = tk.StringVar(value="男")  # 默认选中男性
-radio_male = tk.Radiobutton(frame_gender, text="男", variable=var_gender, value="男")
-radio_male.pack(side=tk.LEFT, padx=10)
-radio_female = tk.Radiobutton(frame_gender, text="女", variable=var_gender, value="女")
-radio_female.pack(side=tk.LEFT, padx=10)
-
-# 3. 计算按钮
-btn_calculate = tk.Button(root, text="计算结果", command=calculate_e)
-btn_calculate.pack(pady=10)
-
-# 4. 过程显示区域（新增）
-label_process = tk.Label(root, text="计算过程详情：")
-label_process.pack(pady=5)
-text_process = tk.Text(root, width=50, height=8)
-text_process.pack(padx=10)
-
-# 5. 最终结果显示区域
-label_result = tk.Label(root, text="最终结果为：", font=("Arial", 12))
-label_result.pack(pady=10)
-
-# 启动主循环
-root.mainloop()
+if __name__ == "__main__":
+    app = AdaptivePoint()
+    app.run()

@@ -12,18 +12,18 @@ if sys.platform == "win32":
 # 可执行文件的设置
 executables = [
     Executable(
-        './hs_send_file_app/send_file_app.py',  # 主脚本文件
+        'D:/Code/git/hs_py/hs_converter/hs_converter.py',  # 主脚本文件
         base=base,
-        target_name='hs_send_file_app',  # 可执行文件名称
+        target_name='hs_converter',  # 可执行文件名称
         icon="my_icon.ico"
     )
 ]
 
 # 打包设置
 setup(
-    name='hs_send_file_app',
+    name='hs_converter_app',
     version='1.0',
-    description='自动发送文件',
+    description='转换格式',
     executables=executables,
     options={
         'build_exe': {
