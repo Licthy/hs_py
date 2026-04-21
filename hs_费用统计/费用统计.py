@@ -5,6 +5,7 @@
 
 import re
 import json
+import os
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
@@ -47,7 +48,7 @@ try:
         QTableWidget, QTableWidgetItem, QLabel, QPushButton, QMessageBox,
         QTabWidget, QTextEdit, QHeaderView, QFileDialog
     )
-    from PyQt5.QtCore import Qt
+    from PyQt5.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot
     from PyQt5.QtGui import QFont
     PYQT_VERSION = 5
     # 别名
@@ -61,7 +62,7 @@ except ImportError:
             QTableWidget, QTableWidgetItem, QLabel, QPushButton, QMessageBox,
             QTabWidget, QTextEdit, QHeaderView, QFileDialog
         )
-        from PyQt6.QtCore import Qt
+        from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot
         from PyQt6.QtGui import QFont
         PYQT_VERSION = 6
         # 别名
@@ -106,7 +107,8 @@ class DataParser:
     def load_num_mapping(self) -> Dict[int, str]:
         """加载编号-名称映射"""
         mapping = {}
-        if not self.mapping_path.exists():
+        # 如果路径为空或文件不存在，返回空映射
+        if not str(self.mapping_path).strip() or not self.mapping_path.exists() or not self.mapping_path.is_file():
             return mapping
 
         with open(self.mapping_path, 'r', encoding='utf-8') as f:
@@ -132,8 +134,15 @@ class DataParser:
         """
         records = []
         errors = []
+        # 检查路径是否有效：非空、存在且为文件
+        if not str(self.input_path).strip():
+            errors.append("未指定费用文件路径，请先选择文件。")
+            return records, errors
         if not self.input_path.exists():
             errors.append(f"文件不存在：{self.input_path}")
+            return records, errors
+        if not self.input_path.is_file():
+            errors.append(f"路径不是文件：{self.input_path}")
             return records, errors
 
         with open(self.input_path, 'r', encoding='utf-8') as f:
@@ -297,22 +306,83 @@ class StatisticsEngine:
         return "\n".join(lines)
 
 
+# ==================== 异步数据加载 ====================
+
+class DataLoaderWorker(QObject):
+    """后台 worker：加载并解析数据，避免UI卡顿"""
+    # 定义信号：finished(records, stats, num_to_name, errors, input_path, mapping_path)
+    finished_signal = pyqtSignal(list, object, dict, list, str, str)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, input_path: str, mapping_path: str):
+        super().__init__()
+        self.input_path = input_path
+        self.mapping_path = mapping_path
+
+    @pyqtSlot()
+    def run(self):
+        """在后台线程中执行耗时操作"""
+        try:
+            # 解析文件
+            parser = DataParser(self.input_path, self.mapping_path)
+            records, num_to_name, errors = parser.parse()
+
+            # 如果没有错误且有记录，计算统计
+            stats = None
+            if not errors and records:
+                stats = StatisticsEngine.compute(records)
+
+            # 发送完成信号
+            self.finished_signal.emit(records, stats, num_to_name, errors, self.input_path, self.mapping_path)
+        except Exception as e:
+            # 发送错误信号
+            self.error_signal.emit(str(e))
+
+
 # ==================== PyQt5 GUI 界面 ====================
 
 class StatisticsGUI(QMainWindow):
     """主窗口"""
 
-    def __init__(self, records: List[DailyRecord], stats: Statistics,
-                 num_to_name: Dict[int, str]):
+    def __init__(self, records: List[DailyRecord], stats: Optional[Statistics],
+                 num_to_name: Dict[int, str], errors: List[str] = None,
+                 input_path: str = "input.txt", mapping_path: str = "num_name.txt"):
         super().__init__()
-        self.records = records
+        self.records = records if records else []
         self.stats = stats
         self.num_to_name = num_to_name
         self.figure = None
         self.canvas = None
+        self.errors = errors or []
+        self.input_path = input_path
+        self.mapping_path = mapping_path
+        # 异步加载相关
+        self.loading_thread = None
+        self.loading_worker = None
+        self.is_loading = False
 
         self.init_ui()
-        self.refresh_table()
+
+        # 根据是否有有效数据且无错误决定是否刷新界面内容
+        if self.stats is not None and (self.stats.all_dates or self.stats.num_totals) and not self.errors:
+            self.refresh_table()
+            self.refresh_summary()
+            self.refresh_raw_data()
+            if MATPLOTLIB_AVAILABLE:
+                self.refresh_chart()
+        else:
+            # 显示无数据状态（包括存在错误或没有有效数据）
+            self.show_no_data_state()
+
+        # 更新顶部摘要标签（始终调用，确保状态正确）
+        self.refresh_summary_label()
+
+        # 如果有错误，在启动时显示
+        if self.errors:
+            error_msg = "\n".join([f"• {err}" for err in self.errors[:10]])
+            if len(self.errors) > 10:
+                error_msg += f"\n... 等共 {len(self.errors)} 个错误"
+            QMessageBox.warning(self, "数据警告", f"发现以下问题：\n\n{error_msg}\n\n请修正 input.txt 文件后点击「重新加载数据」按钮。")
 
     def init_ui(self):
         """初始化界面"""
@@ -333,15 +403,12 @@ class StatisticsGUI(QMainWindow):
         title_label.setAlignment(AlignCenter)
         layout.addWidget(title_label)
 
-        # 统计摘要
-        summary_label = QLabel(
-            f"总费用：{self.stats.grand_total:.1f} 元 | "
-            f"统计日期：{len(self.stats.all_dates)} 天 | "
-            f"编号数量：{len(self.stats.num_totals)} 个"
-        )
-        summary_label.setFont(QFont("Microsoft YaHei", 10))
-        summary_label.setAlignment(AlignCenter)
-        layout.addWidget(summary_label)
+        # 统计摘要（顶部状态栏）
+        self.summary_label = QLabel()
+        self.summary_label.setFont(QFont("Microsoft YaHei", 10))
+        self.summary_label.setAlignment(AlignCenter)
+        layout.addWidget(self.summary_label)
+        self.refresh_summary_label()  # 初始化摘要标签
 
         # 选项卡部件
         tab_widget = QTabWidget()
@@ -388,13 +455,50 @@ class StatisticsGUI(QMainWindow):
             self.figure = Figure(figsize=(8, 5))
             self.canvas = FigureCanvas(self.figure)
             chart_layout.addWidget(self.canvas)
-            self.refresh_chart()
+            # 仅当有统计信息时才刷新图表
+            if self.stats is not None and self.stats.all_dates:
+                self.refresh_chart()
+            else:
+                # 显示空图表提示
+                self.figure.clear()
+                ax = self.figure.add_subplot(111)
+                ax.text(0.5, 0.5, "暂无数据\n请选择费用文件",
+                        horizontalalignment='center', verticalalignment='center',
+                        transform=ax.transAxes, fontsize=14)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                self.canvas.draw()
         else:
             chart_label = QLabel("图表功能需要 matplotlib 库。\n请运行：pip install matplotlib")
             chart_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             chart_layout.addWidget(chart_label)
 
         tab_widget.addTab(chart_tab, "图表可视化")
+
+        # ========== 文件选择区域 ==========
+        file_layout = QHBoxLayout()
+
+        # 费用文件选择
+        self.select_input_btn = QPushButton("📂 选择费用文件")
+        self.select_input_btn.clicked.connect(self.select_input_file)
+        file_layout.addWidget(self.select_input_btn)
+
+        self.input_path_label = QLabel(os.path.basename(self.input_path) if self.input_path else "未选择")
+        self.input_path_label.setStyleSheet("color: #666; font-style: italic;")
+        file_layout.addWidget(self.input_path_label)
+
+        file_layout.addSpacing(20)
+
+        # 编号名字文件选择
+        self.select_mapping_btn = QPushButton("📂 选择编号名字文件")
+        self.select_mapping_btn.clicked.connect(self.select_mapping_file)
+        file_layout.addWidget(self.select_mapping_btn)
+
+        self.mapping_path_label = QLabel(os.path.basename(self.mapping_path) if self.mapping_path else "未选择")
+        self.mapping_path_label.setStyleSheet("color: #666; font-style: italic;")
+        file_layout.addWidget(self.mapping_path_label)
+
+        layout.addLayout(file_layout)
 
         # 按钮区域
         button_layout = QHBoxLayout()
@@ -420,14 +524,20 @@ class StatisticsGUI(QMainWindow):
 
         button_layout.addStretch()
 
+        # 收集需要在加载时禁用的按钮
+        self.action_buttons = [
+            self.select_input_btn,
+            self.select_mapping_btn,
+            self.reload_btn,
+            self.export_btn,
+            self.export_excel_btn,
+            self.copy_btn
+        ]
+
         layout.addLayout(button_layout)
 
-        # 填充内容
-        self.refresh_table()
-        self.refresh_summary()
-        self.refresh_raw_data()
-        if MATPLOTLIB_AVAILABLE:
-            self.refresh_chart()
+        # 注意：不在这里填充内容，由 __init__ 根据数据状态统一处理
+
 
     def refresh_table(self):
         """刷新表格"""
@@ -519,6 +629,122 @@ class StatisticsGUI(QMainWindow):
             lines.append(f"{record.date_str}: {items_str}")
         self.raw_text.setPlainText("\n".join(lines))
 
+    def refresh_summary_label(self):
+        """刷新顶部统计摘要标签"""
+        if self.stats and self.stats.all_dates:
+            total = self.stats.grand_total
+            days = len(self.stats.all_dates)
+            nums = len(self.stats.num_totals)
+            self.summary_label.setText(f"总费用：{total:.1f} 元 | 统计日期：{days} 天 | 编号数量：{nums} 个")
+        else:
+            if not self.input_path:
+                self.summary_label.setText("未选择费用文件 | 请点击「选择费用文件」按钮")
+            elif self.errors:
+                self.summary_label.setText("文件格式错误 | 请重新选择文件")
+            else:
+                self.summary_label.setText("暂无数据 | 请选择费用文件")
+
+    def show_no_data_state(self):
+        """显示无数据状态（当数据解析失败或未选择文件时调用）"""
+        # 表格：显示空表格或提示
+        self.table.setRowCount(1)
+        self.table.setColumnCount(1)
+        self.table.setHorizontalHeaderLabels(["状态"])
+
+        # 根据状态显示不同提示
+        if not self.input_path:
+            status_text = "请选择费用文件\n点击上方「选择费用文件」按钮"
+        elif self.errors:
+            status_text = "文件格式有误\n请重新选择正确的文件"
+        else:
+            status_text = "暂无有效数据\n请检查文件格式"
+
+        item = QTableWidgetItem(status_text)
+        item.setTextAlignment(AlignCenter)
+        self.table.setItem(0, 0, item)
+
+        # 摘要：显示状态信息
+        summary_lines = []
+        summary_lines.append("=" * 60)
+        summary_lines.append("费用统计报告")
+        summary_lines.append("=" * 60)
+        summary_lines.append("")
+
+        if not self.input_path:
+            summary_lines.append("【等待选择文件】")
+            summary_lines.append("-" * 60)
+            summary_lines.append("  尚未选择费用文件。")
+            summary_lines.append("  请点击上方「选择费用文件」按钮选择 input.txt 或费用数据文件。")
+        elif self.errors:
+            summary_lines.append("【文件错误】")
+            summary_lines.append("-" * 60)
+            for err in self.errors:
+                summary_lines.append(f"  • {err}")
+            summary_lines.append("")
+            summary_lines.append("请修正文件后，重新点击「重新加载数据」或重新选择文件。")
+        else:
+            summary_lines.append("【无数据】")
+            summary_lines.append("-" * 60)
+            summary_lines.append("  文件已选择但未解析到有效数据。")
+            summary_lines.append("  请检查文件格式是否符合要求。")
+
+        summary_lines.append("=" * 60)
+        self.summary_text.setPlainText("\n".join(summary_lines))
+
+        # 原始数据：显示状态
+        raw_lines = []
+        raw_lines.append("=" * 60)
+        raw_lines.append("原始数据状态")
+        raw_lines.append("=" * 60)
+        if not self.input_path:
+            raw_lines.append("尚未选择费用文件")
+        elif self.errors:
+            raw_lines.append("文件包含以下错误：")
+            for err in self.errors:
+                raw_lines.append(f"  ✗ {err}")
+        else:
+            raw_lines.append("暂无有效数据")
+        self.raw_text.setPlainText("\n".join(raw_lines))
+
+        # 图表：显示提示
+        if MATPLOTLIB_AVAILABLE and self.figure:
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
+            if not self.input_path:
+                msg = '请选择费用文件'
+            elif self.errors:
+                msg = '文件格式有误\n请重新选择'
+            else:
+                msg = '暂无数据'
+            ax.text(0.5, 0.5, msg,
+                    horizontalalignment='center', verticalalignment='center',
+                    transform=ax.transAxes, fontsize=14)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            self.canvas.draw()
+
+    def select_input_file(self):
+        """选择输入文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择输入文件", os.path.dirname(self.input_path),
+            "Text Files (*.txt);;All Files (*)"
+        )
+        if file_path:
+            self.input_path = file_path
+            self.input_path_label.setText(os.path.basename(file_path))
+            self.reload_data()
+
+    def select_mapping_file(self):
+        """选择编号映射文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择编号映射文件", os.path.dirname(self.mapping_path),
+            "Text Files (*.txt);;All Files (*)"
+        )
+        if file_path:
+            self.mapping_path = file_path
+            self.mapping_path_label.setText(os.path.basename(file_path))
+            self.reload_data()
+
     def refresh_chart(self):
         """刷新图表"""
         if not MATPLOTLIB_AVAILABLE:
@@ -579,40 +805,40 @@ class StatisticsGUI(QMainWindow):
         self.canvas.draw()
 
     def reload_data(self):
-        """重新加载数据"""
-        try:
-            # 重新解析
-            parser = DataParser("input.txt", "num_name.txt")
-            records, num_to_name, errors = parser.parse()
+        """重新加载数据（使用当前选择的文件）- 异步版本"""
+        # 验证输入文件是否已选择
+        if not self.input_path:
+            QMessageBox.warning(self, "提示", "请先选择费用文件！")
+            return
 
-            # 显示错误（如果有）
-            if errors:
-                error_msg = "\n".join([f"• {err}" for err in errors[:10]])
-                if len(errors) > 10:
-                    error_msg += f"\n... 等共 {len(errors)} 个错误"
-                QMessageBox.warning(self, "数据警告", f"发现以下格式问题：\n\n{error_msg}\n\n已跳过错误行继续处理。")
+        # 如果已在加载中，忽略（或可取消上次）
+        if self.is_loading:
+            QMessageBox.information(self, "提示", "正在加载中，请稍候...")
+            return
 
-            if not records:
-                QMessageBox.warning(self, "警告", "未解析到任何有效数据！\n请检查 input.txt 格式是否正确。")
-                return
+        # 如果未选择映射文件，给出提示但仍继续（映射文件是可选的）
+        if not self.mapping_path:
+            QMessageBox.information(self, "提示", "未选择编号名字文件，将只显示编号数字。\n如需显示名称，请选择编号名字文件。")
 
-            stats = StatisticsEngine.compute(records)
+        # 启动后台线程
+        self.start_loading()
 
-            # 更新数据
-            self.records = records
-            self.stats = stats
-            self.num_to_name = num_to_name
+        # 创建并启动 worker 线程
+        self.loading_thread = QThread()
+        self.loading_worker = DataLoaderWorker(self.input_path, self.mapping_path)
+        self.loading_worker.moveToThread(self.loading_thread)
 
-            # 刷新界面
-            self.refresh_table()
-            self.refresh_summary()
-            self.refresh_raw_data()
-            if MATPLOTLIB_AVAILABLE:
-                self.refresh_chart()
+        # 连接信号
+        self.loading_thread.started.connect(self.loading_worker.run)
+        self.loading_worker.finished_signal.connect(self.on_data_loaded)
+        self.loading_worker.error_signal.connect(self.on_loading_error)
+        # 线程结束时清理
+        self.loading_worker.finished_signal.connect(self.loading_thread.quit)
+        self.loading_worker.error_signal.connect(self.loading_thread.quit)
+        self.loading_thread.finished.connect(self.on_loading_finished)
 
-            QMessageBox.information(self, "成功", f"数据已重新加载！\n共 {len(records)} 天，{len(stats.num_totals)} 个编号")
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"重新加载失败：\n{str(e)}")
+        # 启动
+        self.loading_thread.start()
 
     def export_report(self):
         """导出报告到 txt 文件"""
@@ -808,6 +1034,98 @@ class StatisticsGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"复制失败：\n{str(e)}")
 
+    def start_loading(self):
+        """开始加载状态"""
+        self.is_loading = True
+        # 禁用所有操作按钮
+        for btn in self.action_buttons:
+            btn.setEnabled(False)
+        # 更新顶部标签显示加载中
+        self.summary_label.setText("正在加载数据，请稍候...")
+        # 显示加载占位界面
+        self.show_loading_state()
+
+    def show_loading_state(self):
+        """显示加载中的占位界面"""
+        self.table.setRowCount(1)
+        self.table.setColumnCount(1)
+        self.table.setHorizontalHeaderLabels(["状态"])
+        item = QTableWidgetItem("正在加载数据，请稍候...")
+        item.setTextAlignment(AlignCenter)
+        self.table.setItem(0, 0, item)
+        summary_lines = ["=" * 60, "费用统计报告", "=" * 60, "", "正在加载数据，请稍候...", "=" * 60]
+        self.summary_text.setPlainText("\n".join(summary_lines))
+        self.raw_text.setPlainText("正在加载数据...")
+        if MATPLOTLIB_AVAILABLE and self.figure:
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, "正在加载数据...",
+                    horizontalalignment='center', verticalalignment='center',
+                    transform=ax.transAxes, fontsize=14)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            self.canvas.draw()
+
+    def on_data_loaded(self, records, stats, num_to_name, errors, input_path, mapping_path):
+        """后台加载完成后的UI更新"""
+        self.records = records
+        self.stats = stats
+        self.num_to_name = num_to_name
+        self.errors = errors
+        self.input_path = input_path
+        self.mapping_path = mapping_path
+        self.is_loading = False
+
+        if errors:
+            error_msg = "\n".join([f"• {err}" for err in errors[:10]])
+            if len(errors) > 10:
+                error_msg += f"\n... 等共 {len(errors)} 个错误"
+            QMessageBox.warning(self, "数据警告", f"发现以下格式问题：\n\n{error_msg}\n\n请修正文件后重新选择。")
+            self.records = []
+            self.stats = Statistics(daily_data={}, num_totals={}, daily_totals={}, grand_total=0.0, all_dates=[])
+            self.num_to_name = {}
+            self.show_no_data_state()
+            self.refresh_summary_label()
+            return
+
+        if not records:
+            QMessageBox.warning(self, "警告", "未解析到任何有效数据！\n请检查费用文件格式是否正确。")
+            self.records = []
+            self.stats = Statistics(daily_data={}, num_totals={}, daily_totals={}, grand_total=0.0, all_dates=[])
+            self.num_to_name = {}
+            self.errors = []
+            self.show_no_data_state()
+            self.refresh_summary_label()
+            return
+
+        self.errors = []
+        self.refresh_table()
+        self.refresh_summary()
+        self.refresh_raw_data()
+        if MATPLOTLIB_AVAILABLE:
+            self.refresh_chart()
+        self.refresh_summary_label()
+        QMessageBox.information(self, "成功", f"数据已重新加载！\n共 {len(records)} 天，{len(stats.num_totals)} 个编号")
+
+    def on_loading_error(self, error_msg):
+        """加载过程中出现异常"""
+        self.is_loading = False
+        QMessageBox.critical(self, "错误", f"加载数据时发生异常：\n{error_msg}")
+        self.records = []
+        self.stats = Statistics(daily_data={}, num_totals={}, daily_totals={}, grand_total=0.0, all_dates=[])
+        self.num_to_name = {}
+        self.errors = [f"系统错误: {error_msg}"]
+        self.show_no_data_state()
+        self.refresh_summary_label()
+
+    def on_loading_finished(self):
+        """线程结束后的清理"""
+        self.is_loading = False
+        # 重新启用所有按钮
+        for btn in self.action_buttons:
+            btn.setEnabled(True)
+        self.loading_thread = None
+        self.loading_worker = None
 
 
 
@@ -815,37 +1133,19 @@ class StatisticsGUI(QMainWindow):
 
 def main():
     """主函数"""
-    # 检查文件是否存在
-    input_path = Path("input.txt")
-    mapping_path = Path("num_name.txt")
+    # 初始状态：不自动加载文件，等待用户选择
+    records = []
+    num_to_name = {}
+    stats = Statistics(
+        daily_data={}, num_totals={}, daily_totals={}, grand_total=0.0, all_dates=[]
+    )
+    errors = []  # 初始无错误，因为没有尝试加载
 
-    if not input_path.exists():
-        print("错误：未找到 input.txt 文件！")
-        print("请将 input.txt 放在当前目录，或使用提供的模板格式。")
-        return
-
-    # 解析数据
-    parser = DataParser(str(input_path), str(mapping_path))
-    records, num_to_name, errors = parser.parse()
-
-    # 显示错误（如果有）
-    if errors:
-        print("数据解析错误：")
-        for err in errors:
-            print(f"  - {err}")
-        print("\n请检查 input.txt 格式后重新运行。")
-        return
-
-    if not records:
-        print("警告：未解析到任何数据，请检查 input.txt 格式！")
-        return
-
-    # 统计
-    stats = StatisticsEngine.compute(records)
-
-    # 启动 GUI
+    # 启动 GUI（传递空路径，表示尚未选择文件）
     app = QApplication(sys.argv)
-    window = StatisticsGUI(records, stats, num_to_name)
+    window = StatisticsGUI(records, stats, num_to_name, errors,
+                          input_path="",  # 空路径表示未选择
+                          mapping_path="")  # 空路径表示未选择
     window.show()
     if PYQT_VERSION == 5:
         sys.exit(app.exec_())
