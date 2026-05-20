@@ -31,7 +31,8 @@ class DropTable(QTableWidget):
         super().__init__()
         self._tab = tab
         self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.NoDragDrop)
+        self.setDragDropMode(QAbstractItemView.DropOnly)
+        self.viewport().setAcceptDrops(True)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
@@ -275,11 +276,22 @@ class App(QMainWindow):
 
         # 数据
         self._tab_wrappers: list[ProgramTab] = []
+        self._last_active_tab = 0
         self._load_config()
         if not self._tab_wrappers:
             self._add_tab("默认列表")
+        # 恢复上次停留的页签
+        if 0 <= self._last_active_tab < self.tabs.count():
+            self.tabs.setCurrentIndex(self._last_active_tab)
+        # 页签切换时自动保存
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
     # ── 页签管理 ──
+
+    def _on_tab_changed(self, index: int):
+        """页签切换时自动保存"""
+        self._last_active_tab = index
+        self.save_config()
 
     def _add_tab(self, name: str | None = None) -> ProgramTab:
         if name is None:
@@ -354,10 +366,13 @@ class App(QMainWindow):
 
     def save_config(self):
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        data = [
-            {"name": tw.name, "programs": tw._items}
-            for tw in self._tab_wrappers
-        ]
+        data = {
+            "last_active_tab": self.tabs.currentIndex(),
+            "tabs": [
+                {"name": tw.name, "programs": tw._items}
+                for tw in self._tab_wrappers
+            ],
+        }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -370,7 +385,13 @@ class App(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "读取配置失败", str(e))
             return
-        for item in data:
+        # 兼容旧格式（数组 → 新格式）
+        if isinstance(data, list):
+            tabs_data = data
+        else:
+            tabs_data = data.get("tabs", [])
+            self._last_active_tab = data.get("last_active_tab", 0)
+        for item in tabs_data:
             tab = self._add_tab(item.get("name", "未命名"))
             tab.load_items(item.get("programs", []))
 
