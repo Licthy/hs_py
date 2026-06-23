@@ -10,12 +10,13 @@ import subprocess
 import shutil
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QRect, QSize, QPoint
 from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QLabel, QFileDialog, QCheckBox, QMenu,
+    QLayout, QSizePolicy,
 )
 
 # ── DPI ──
@@ -299,6 +300,94 @@ class ExportWorker(QThread):
             self.export_finished.emit(-1)
 
 # ══════════════════════════════════════════════════
+#  流式布局（关键词 chips 换行支持）
+# ══════════════════════════════════════════════════
+
+class FlowLayout(QLayout):
+    """自动换行的流式布局，用于关键词快捷按钮区"""
+
+    def __init__(self, parent=None, margin=0, h_spacing=4, v_spacing=4):
+        super().__init__(parent)
+        self._items = []
+        self._h_spacing = h_spacing
+        self._v_spacing = v_spacing
+        if margin >= 0:
+            self.setContentsMargins(margin, margin, margin, margin)
+
+    def __del__(self):
+        while self.count():
+            self.takeAt(0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        margins = self.contentsMargins()
+        x = rect.x() + margins.left()
+        y = rect.y() + margins.top()
+        line_height = 0
+        right_edge = rect.right() - margins.right()
+
+        for item in self._items:
+            item_size = item.sizeHint()
+            space_x = self._h_spacing
+            space_y = self._v_spacing
+
+            next_x = x + item_size.width() + space_x
+            # 当前行放不下 → 换行
+            if next_x - space_x > right_edge and line_height > 0:
+                x = rect.x() + margins.left()
+                y = y + line_height + space_y
+                next_x = x + item_size.width() + space_x
+                line_height = 0
+
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item_size))
+
+            x = next_x
+            line_height = max(line_height, item_size.height())
+
+        return y + line_height - rect.y() + margins.bottom()
+
+
+# ══════════════════════════════════════════════════
 #  主窗口
 # ══════════════════════════════════════════════════
 
@@ -408,7 +497,7 @@ class SvnRevertApp(QMainWindow):
         main.addLayout(kw_row)
 
         # ── 关键词快捷按钮 ──
-        self._kw_chips_layout = QHBoxLayout()
+        self._kw_chips_layout = FlowLayout(margin=0, h_spacing=4, v_spacing=2)
         self._kw_chips_layout.setSpacing(4)
         self._kw_chips = []
         main.addLayout(self._kw_chips_layout)
@@ -449,13 +538,6 @@ class SvnRevertApp(QMainWindow):
         self.commit_btn.clicked.connect(self._on_commit)
         action_row.addWidget(self.commit_btn)
 
-        self.delete_btn = QPushButton("删除选中文件")
-        self.delete_btn.setObjectName("actionBtn")
-        self.delete_btn.setFixedHeight(32)
-        self.delete_btn.setStyleSheet("QPushButton { color: #dc2626; border-color: #fca5a5; } QPushButton:hover { background: #fef2f2; border-color: #dc2626; }")
-        self.delete_btn.clicked.connect(self._on_delete)
-        action_row.addWidget(self.delete_btn)
-
         self.export_btn = QPushButton("导表")
         self.export_btn.setObjectName("actionBtn")
         self.export_btn.setFixedHeight(32)
@@ -464,6 +546,13 @@ class SvnRevertApp(QMainWindow):
         action_row.addWidget(self.export_btn)
 
         action_row.addStretch()
+
+        self.delete_btn = QPushButton("删除选中文件")
+        self.delete_btn.setObjectName("actionBtn")
+        self.delete_btn.setFixedHeight(32)
+        self.delete_btn.setStyleSheet("QPushButton { color: #dc2626; border-color: #fca5a5; } QPushButton:hover { background: #fef2f2; border-color: #dc2626; }")
+        self.delete_btn.clicked.connect(self._on_delete)
+        action_row.addWidget(self.delete_btn)
         main.addLayout(action_row)
         self.file_list = QListWidget()
         self.file_list.setAlternatingRowColors(True)
@@ -905,7 +994,15 @@ class SvnRevertApp(QMainWindow):
     def _load_keywords(self):
         try:
             with open(self._kw_file(), "r", encoding="utf-8") as f:
-                self._kw_chips[:] = json.load(f)
+                data = json.load(f)
+            # 兼容旧格式（纯字符串列表）→ 转为 {kw, count} dict
+            normalized = []
+            for item in data:
+                if isinstance(item, str):
+                    normalized.append({"kw": item, "count": 1})
+                else:
+                    normalized.append(item)
+            self._kw_chips[:] = normalized
         except Exception:
             self._kw_chips[:] = []
 
@@ -917,22 +1014,34 @@ class SvnRevertApp(QMainWindow):
             pass
 
     def _add_keyword(self, kw):
+        """记录关键词使用，按使用频率排序，最多保留 20 个（约两行）"""
         kw = kw.strip()
         if not kw:
             return
-        if kw in self._kw_chips:
-            self._kw_chips.remove(kw)
-        self._kw_chips.insert(0, kw)
-        if len(self._kw_chips) > 10:
-            self._kw_chips[:] = self._kw_chips[:10]
+        # 查找已存在的条目，递增计数
+        found = False
+        for entry in self._kw_chips:
+            if entry["kw"] == kw:
+                entry["count"] += 1
+                found = True
+                break
+        if not found:
+            self._kw_chips.insert(0, {"kw": kw, "count": 1})
+        # 按 count 降序排列
+        self._kw_chips.sort(key=lambda x: x["count"], reverse=True)
+        # 最多保留 20 个
+        if len(self._kw_chips) > 20:
+            self._kw_chips[:] = self._kw_chips[:20]
         self._save_keywords()
         self._refresh_chips()
 
     def _remove_keyword(self, kw):
-        if kw in self._kw_chips:
-            self._kw_chips.remove(kw)
-            self._save_keywords()
-            self._refresh_chips()
+        for entry in self._kw_chips:
+            if entry["kw"] == kw:
+                self._kw_chips.remove(entry)
+                self._save_keywords()
+                self._refresh_chips()
+                return
 
     def _refresh_chips(self):
         # 清空已有
@@ -943,13 +1052,18 @@ class SvnRevertApp(QMainWindow):
         # 主题判定
         is_light = (self._current_theme == "light")
         fg = "#6b7280" if is_light else "#94a3b8"
+        count_fg = "#9ca3af" if is_light else "#64748b"
         # 重建
-        for kw in self._kw_chips:
+        for entry in self._kw_chips:
+            kw = entry["kw"]
+            count = entry.get("count", 0)
             chip = QWidget()
             row = QHBoxLayout(chip)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(0)
-            kw_btn = QPushButton(kw)
+            # 按钮文本: "关键词 (使用次数)"
+            btn_text = f"{kw} ({count})" if count > 1 else kw
+            kw_btn = QPushButton(btn_text)
             kw_btn.setObjectName("actionBtn")
             kw_btn.setFixedHeight(24)
             kw_btn.setStyleSheet(f"color: {fg}; border-right: none; border-top-right-radius: 0; border-bottom-right-radius: 0;")
@@ -959,14 +1073,13 @@ class SvnRevertApp(QMainWindow):
             close_btn.setFixedSize(22, 24)
             close_btn.setObjectName("actionBtn")
             close_btn.setStyleSheet(
-                f"QPushButton {{ color: {fg}; "
+                f"QPushButton {{ color: {count_fg}; "
                 f"border-left: none; border-radius: 0 6px 6px 0; "
                 f"padding: 0; font-size: 11px; }}"
             )
             close_btn.clicked.connect(lambda checked, k=kw: self._remove_keyword(k))
             row.addWidget(close_btn)
             self._kw_chips_layout.addWidget(chip)
-        self._kw_chips_layout.addStretch()
 
     def _log(self, msg):
         self.log_output.append(msg)
