@@ -5,25 +5,20 @@ SVN Revert Tool — 按文件名模糊匹配，批量 revert + update
 import sys
 import os
 import json
-import ctypes as _ct
 import subprocess
 import shutil
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QRect, QSize, QPoint
-from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon
+from PySide6.QtGui import QFont, QPalette, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QLabel, QFileDialog, QCheckBox, QMenu,
-    QLayout, QSizePolicy,
+    QLayout, QStyledItemDelegate, QStyleOptionViewItem,
 )
 
 # ── DPI ──
-try:
-    _ct.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    pass
 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 
 # ── 默认目录 ──
@@ -92,8 +87,7 @@ QListWidget {
     background: #f9fafb; border: 1.5px solid #e5e5e5; border-radius: 8px;
     padding: 4px; color: #111827;
 }
-QListWidget::item { padding: 5px 10px; border-radius: 3px; min-height: 22px; }
-QListWidget::item:alternate { background: #f3f4f6; }
+QListWidget::item { background: transparent; padding: 5px 10px; border-radius: 3px; min-height: 22px; }
 QListWidget::item:hover { background: #e5e7eb; }
 QListWidget::item:selected, QListWidget::item:selected:!active {
     background: #2563eb; color: #ffffff;
@@ -159,8 +153,7 @@ QListWidget {
     background: #0f172a; border: 1px solid #1e293b; border-radius: 8px;
     padding: 4px; color: #e2e8f0;
 }
-QListWidget::item { padding: 5px 10px; border-radius: 3px; min-height: 22px; color: #e2e8f0; }
-QListWidget::item:alternate { background: #0c1222; color: #e2e8f0; }
+QListWidget::item { background: transparent; padding: 5px 10px; border-radius: 3px; min-height: 22px; color: #e2e8f0; }
 QListWidget::item:hover { background: #1e293b; color: #e2e8f0; }
 QListWidget::item:selected, QListWidget::item:selected:!active {
     background: #06b6d4; color: #020617;
@@ -388,8 +381,37 @@ class FlowLayout(QLayout):
 
 
 # ══════════════════════════════════════════════════
-#  主窗口
+#  自定义 Delegate — 绕过 QSS 绘制缺失文件底色
 # ══════════════════════════════════════════════════
+
+class FileListDelegate(QStyledItemDelegate):
+    """自定义绘制底色：缺失文件红色，存在文件交替灰/白"""
+
+    def __init__(self, app_ref, parent=None):
+        super().__init__(parent)
+        self._app = app_ref
+
+    def paint(self, painter, option, index):
+        data = index.data(Qt.ItemDataRole.UserRole)
+        is_light = (self._app._current_theme == "light")
+
+        if data is not None and not data.get("exists", True):
+            bg = QColor("#fef2f2") if is_light else QColor("#2d1111")
+        else:
+            alt_idx = data.get("alt_idx", 0) if data else 0
+            if alt_idx % 2:
+                bg = QColor("#f3f4f6") if is_light else QColor("#0c1222")
+            else:
+                bg = QColor("#f9fafb") if is_light else QColor("#0f172a")
+
+        painter.save()
+        painter.fillRect(option.rect, bg)
+        painter.restore()
+
+        opt = QStyleOptionViewItem(option)
+        opt.showDecorationSelected = True
+        super().paint(painter, opt, index)
+
 
 class SvnRevertApp(QMainWindow):
     def __init__(self):
@@ -468,6 +490,10 @@ class SvnRevertApp(QMainWindow):
         browse = QPushButton("浏览...")
         browse.clicked.connect(self._on_browse)
         dir_row.addWidget(browse)
+        open_svn_dir = QPushButton("打开")
+        open_svn_dir.setToolTip("在资源管理器中打开 SVN 目录")
+        open_svn_dir.clicked.connect(lambda: self._open_dir(self.dir_input.text().strip(), "SVN 目录"))
+        dir_row.addWidget(open_svn_dir)
         main.addLayout(dir_row)
 
         # ── 导表路径 ──
@@ -480,6 +506,10 @@ class SvnRevertApp(QMainWindow):
         browse_export = QPushButton("浏览...")
         browse_export.clicked.connect(self._on_browse_export)
         export_row.addWidget(browse_export)
+        open_export_dir = QPushButton("打开")
+        open_export_dir.setToolTip("在资源管理器中打开导表 BAT 所在目录")
+        open_export_dir.clicked.connect(lambda: self._open_dir(os.path.dirname(self.export_path_input.text().strip()), "导表目录"))
+        export_row.addWidget(open_export_dir)
         main.addLayout(export_row)
 
         # ── 关键词 ──
@@ -498,7 +528,6 @@ class SvnRevertApp(QMainWindow):
 
         # ── 关键词快捷按钮 ──
         self._kw_chips_layout = FlowLayout(margin=0, h_spacing=4, v_spacing=2)
-        self._kw_chips_layout.setSpacing(4)
         self._kw_chips = []
         main.addLayout(self._kw_chips_layout)
         self._load_keywords()
@@ -555,14 +584,13 @@ class SvnRevertApp(QMainWindow):
         action_row.addWidget(self.delete_btn)
         main.addLayout(action_row)
         self.file_list = QListWidget()
-        self.file_list.setAlternatingRowColors(True)
+        self.file_list.setItemDelegate(FileListDelegate(self))
         # QPalette 保证失焦时选中项也保持高亮
         self._file_list_palette = self.file_list.palette()
         self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self._on_context_menu)
         self.file_list.itemDoubleClicked.connect(self._on_double_click)
         self.file_list.itemClicked.connect(self._on_item_clicked)
-        self.file_list.itemEntered.connect(self.file_list.setCurrentItem)
         main.addWidget(self.file_list, 1)
 
         # ── 日志 ──
@@ -603,6 +631,7 @@ class SvnRevertApp(QMainWindow):
         self._update_theme_buttons()
         self._update_inline_styles()
         self._update_file_list_palette(theme)
+        self.file_list.viewport().update()
         self._refresh_chips()
 
     def _update_theme_buttons(self):
@@ -641,6 +670,17 @@ class SvnRevertApp(QMainWindow):
         if d:
             self.dir_input.setText(d)
             self._on_search()
+
+    def _open_dir(self, path, desc=""):
+        """在资源管理器中打开目录"""
+        if path and os.path.isdir(path):
+            try:
+                os.startfile(path)
+                self._log(f"📂 打开目录: {path}")
+            except Exception as e:
+                self._log(f"❌ 打开失败: {e}")
+        else:
+            self._log(f"⚠ 目录不存在: {path or desc or '(空)'}")
 
     def _on_browse_export(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -780,6 +820,16 @@ class SvnRevertApp(QMainWindow):
         commit_action.triggered.connect(lambda: self._commit_single(data["filename"]))
 
         menu.addSeparator()
+        log_action = menu.addAction("SVN 日志")
+        log_action.triggered.connect(lambda: self._svn_log_single(data["filename"]))
+
+        cleanup_action = menu.addAction("SVN 清理")
+        cleanup_action.triggered.connect(lambda: self._svn_cleanup_single(data["filename"]))
+
+        update_action = menu.addAction("SVN 更新")
+        update_action.triggered.connect(lambda: self._svn_update_single(data["filename"]))
+
+        menu.addSeparator()
         del_action = menu.addAction("删除文件")
         del_action.triggered.connect(lambda: self._delete_single(data["full_path"], data["filename"]))
 
@@ -915,6 +965,80 @@ class SvnRevertApp(QMainWindow):
                 break
         self._on_commit()
 
+    def _svn_log_single(self, filename):
+        """呼出 TortoiseSVN 日志窗口（回退到命令行）"""
+        workdir = self.dir_input.text().strip()
+        self._log(f"📜 SVN 日志: {filename}")
+        full_path = os.path.join(workdir, filename)
+        tortoise = shutil.which("TortoiseProc.exe")
+        if tortoise:
+            try:
+                subprocess.Popen(
+                    [tortoise, "/command:log", f"/path:{full_path}"],
+                    cwd=workdir,
+                    creationflags=_NO_WINDOW,
+                )
+                self._log("  已呼出 TortoiseSVN 日志窗口")
+            except Exception as e:
+                self._log(f"❌ 打开日志失败: {e}")
+        else:
+            try:
+                subprocess.Popen(
+                    ["svn", "log", filename],
+                    cwd=workdir,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            except Exception as e:
+                self._log(f"❌ 打开日志失败: {e}")
+
+    def _svn_cleanup_single(self, _filename):
+        """SVN 清理（作用于整个工作目录）"""
+        workdir = self.dir_input.text().strip()
+        self._log(f"🧹 SVN 清理: {workdir}")
+        try:
+            r = subprocess.run(
+                ["svn", "cleanup"], cwd=workdir,
+                capture_output=True, text=True, timeout=60,
+                encoding="gbk", errors="replace",
+                creationflags=_NO_WINDOW,
+            )
+            if r.returncode == 0:
+                self._log(f"  清理完成")
+            else:
+                self._log(f"  清理返回码 {r.returncode}")
+            if r.stderr.strip():
+                for line in r.stderr.strip().split("\n"):
+                    if line:
+                        self._log(f"  [stderr] {line}")
+        except Exception as e:
+            self._log(f"❌ 清理失败: {e}")
+
+    def _svn_update_single(self, filename):
+        """SVN 更新单个文件"""
+        workdir = self.dir_input.text().strip()
+        self._log(f"⬇ SVN 更新: {filename}")
+        try:
+            r = subprocess.run(
+                ["svn", "update", filename], cwd=workdir,
+                capture_output=True, text=True, timeout=120,
+                encoding="gbk", errors="replace",
+                creationflags=_NO_WINDOW,
+            )
+            for line in r.stdout.strip().split("\n"):
+                if line:
+                    self._log(f"  {line}")
+            if r.stderr.strip():
+                for line in r.stderr.strip().split("\n"):
+                    if line:
+                        self._log(f"  [stderr] {line}")
+            self._log(f"  {'更新完成' if r.returncode == 0 else f'返回码 {r.returncode}'}")
+            # 刷新文件列表以反映最新状态
+            self._on_search()
+        except subprocess.TimeoutExpired:
+            self._log("  ⏱ 超时")
+        except Exception as e:
+            self._log(f"❌ 更新失败: {e}")
+
     def _on_commit(self):
         """对选中的文件呼出 SVN 提交界面"""
         workdir = self.dir_input.text().strip()
@@ -966,6 +1090,7 @@ class SvnRevertApp(QMainWindow):
         self.file_list.clear()
         # 排序：存在的文件在上，不存在的在下
         sorted_entries = sorted(entries, key=lambda e: (not e[3], e[1].lower()))
+        alt_idx = 0
         for sc, fn, full_path, exists in sorted_entries:
             if sc:
                 label = STATUS_LABEL.get(sc, sc)
@@ -978,8 +1103,14 @@ class SvnRevertApp(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, {
                 "filename": fn, "full_path": full_path,
                 "status": sc, "exists": exists,
+                "alt_idx": alt_idx,
             })
+            if exists:
+                alt_idx += 1
             self.file_list.addItem(item)
+        if self.file_list.count() > 0:
+            self.file_list.setCurrentRow(0)
+            self.file_list.scrollToItem(self.file_list.item(0), QListWidget.ScrollHint.PositionAtTop)
         self._count_label.setText(f"文件: {len(entries)}")
         self.search_btn.setEnabled(True)
         self.revert_btn.setEnabled(len(entries) > 0)
