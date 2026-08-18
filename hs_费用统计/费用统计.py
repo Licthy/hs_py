@@ -46,7 +46,7 @@ try:
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QTableWidget, QTableWidgetItem, QLabel, QPushButton, QMessageBox,
-        QTabWidget, QTextEdit, QHeaderView, QFileDialog
+        QTabWidget, QTextEdit, QHeaderView, QFileDialog, QComboBox
     )
     from PyQt5.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot
     from PyQt5.QtGui import QFont
@@ -60,7 +60,7 @@ except ImportError:
         from PyQt6.QtWidgets import (
             QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
             QTableWidget, QTableWidgetItem, QLabel, QPushButton, QMessageBox,
-            QTabWidget, QTextEdit, QHeaderView, QFileDialog
+            QTabWidget, QTextEdit, QHeaderView, QFileDialog, QComboBox
         )
         from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot
         from PyQt6.QtGui import QFont
@@ -73,6 +73,54 @@ except ImportError:
         print("错误：未找到 PyQt5 或 PyQt6。")
         print("请安装：pip install PyQt5  或  pip install PyQt6")
         sys.exit(1)
+
+
+# ==================== 配置文件（记住用户设置） ====================
+
+MAX_DECIMALS = 5  # 小数位数上限
+
+
+def get_app_dir() -> str:
+    """获取程序所在目录（兼容源码运行和打包后的 exe）
+
+    打包后（frozen）使用 _internal 目录存放 config.json；
+    源码运行时存放在脚本同目录。
+    """
+    if getattr(sys, 'frozen', False):
+        # PyInstaller onedir 模式下 _MEIPASS 指向 <exe目录>/_internal
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            return meipass
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_FILE = os.path.join(get_app_dir(), "config.json")
+
+
+def load_config() -> dict:
+    """读取配置文件；文件不存在或损坏时返回默认配置"""
+    config = {"decimals": 1}
+    try:
+        if os.path.isfile(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "decimals" in data:
+                config["decimals"] = int(data["decimals"])
+    except Exception:
+        pass  # 配置损坏时使用默认值
+    # 限制在合法范围（0 ~ MAX_DECIMALS）
+    config["decimals"] = max(0, min(config["decimals"], MAX_DECIMALS))
+    return config
+
+
+def save_config(decimals: int) -> None:
+    """保存配置到配置文件"""
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump({"decimals": int(decimals)}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"保存配置失败：{e}")
 
 
 # ==================== 数据类定义 ====================
@@ -250,8 +298,8 @@ class StatisticsEngine:
 
     @staticmethod
     def generate_report(records: List[DailyRecord], stats: Statistics,
-                        num_to_name: Dict[int, str]) -> str:
-        """生成文本报告"""
+                        num_to_name: Dict[int, str], decimals: int = 1) -> str:
+        """生成文本报告（decimals: 保留的小数位数）"""
         lines = []
         lines.append("=" * 60)
         lines.append("费用统计报告")
@@ -262,7 +310,7 @@ class StatisticsEngine:
         # ========== 1. 总总计（最上面） ==========
         lines.append("【总总计】")
         lines.append("-" * 60)
-        lines.append(f"  全部费用合计：{stats.grand_total:.1f} 元")
+        lines.append(f"  全部费用合计：{stats.grand_total:.{decimals}f} 元")
         lines.append("")
 
         # ========== 2. 各编号费用总计 ==========
@@ -271,14 +319,14 @@ class StatisticsEngine:
         for num in sorted(stats.num_totals.keys()):
             name = num_to_name.get(num, f"编号{num}")
             total = stats.num_totals[num]
-            lines.append(f"  {num}（{name}）: {total:.1f} 元")
+            lines.append(f"  {num}（{name}）: {total:.{decimals}f} 元")
         lines.append("")
 
         # ========== 3. 每日费用总计 ==========
         lines.append("【每日费用总计】")
         lines.append("-" * 60)
         for date in stats.all_dates:
-            lines.append(f"  {date}: {stats.daily_totals[date]:.1f} 元")
+            lines.append(f"  {date}: {stats.daily_totals[date]:.{decimals}f} 元")
         lines.append("")
 
         # ========== 4. 各编号费用明细（最后） ==========
@@ -293,7 +341,7 @@ class StatisticsEngine:
             for date in stats.all_dates:
                 cost = stats.daily_data[date].get(num, 0.0)
                 if cost > 0:
-                    lines.append(f"  {date}: {cost:.1f} 元")
+                    lines.append(f"  {date}: {cost:.{decimals}f} 元")
                     has_data = True
             if not has_data:
                 lines.append("  （无费用记录）")
@@ -360,6 +408,10 @@ class StatisticsGUI(QMainWindow):
         self.loading_thread = None
         self.loading_worker = None
         self.is_loading = False
+        # 保留的小数位数（从配置文件读取上次选择，默认 1 位，最高 5 位）
+        config = load_config()
+        self.decimals = config["decimals"]
+        self.max_decimals = MAX_DECIMALS
 
         self.init_ui()
 
@@ -522,6 +574,19 @@ class StatisticsGUI(QMainWindow):
         self.copy_btn.clicked.connect(self.copy_table_to_clipboard)
         button_layout.addWidget(self.copy_btn)
 
+        # 小数位数下拉框
+        decimals_label = QLabel("小数位数:")
+        decimals_label.setFont(QFont("Microsoft YaHei", 9))
+        button_layout.addWidget(decimals_label)
+
+        self.decimals_combo = QComboBox()
+        self.decimals_combo.addItems([f"{i} 位小数" for i in range(self.max_decimals + 1)])
+        self.decimals_combo.setCurrentIndex(self.decimals)
+        self.decimals_combo.setToolTip(f"选择数字保留的小数位数（0-{self.max_decimals} 位）")
+        # 先设置好当前值再连接信号，避免初始化时触发刷新
+        self.decimals_combo.currentIndexChanged.connect(self.on_decimals_changed)
+        button_layout.addWidget(self.decimals_combo)
+
         button_layout.addStretch()
 
         # 收集需要在加载时禁用的按钮
@@ -531,13 +596,35 @@ class StatisticsGUI(QMainWindow):
             self.reload_btn,
             self.export_btn,
             self.export_excel_btn,
-            self.copy_btn
+            self.copy_btn,
+            self.decimals_combo
         ]
 
         layout.addLayout(button_layout)
 
         # 注意：不在这里填充内容，由 __init__ 根据数据状态统一处理
 
+
+    def fmt(self, value: float) -> str:
+        """按当前选择的小数位数格式化数值"""
+        return f"{value:.{self.decimals}f}"
+
+    def on_decimals_changed(self, index: int):
+        """下拉框选择变化时，更新小数位数、保存配置并刷新全部界面"""
+        if index != self.decimals:
+            self.decimals = index
+            save_config(self.decimals)
+            self.refresh_all()
+
+    def refresh_all(self):
+        """按当前设置（如小数位数）刷新全部界面内容"""
+        if self.stats is not None and (self.stats.all_dates or self.stats.num_totals) and not self.errors:
+            self.refresh_table()
+            self.refresh_summary()
+            self.refresh_raw_data()
+            if MATPLOTLIB_AVAILABLE:
+                self.refresh_chart()
+        self.refresh_summary_label()
 
     def refresh_table(self):
         """刷新表格"""
@@ -565,13 +652,13 @@ class StatisticsGUI(QMainWindow):
         # 填充每日总计数据（各日期列）
         for col_idx, date in enumerate(self.stats.all_dates):
             daily_total = self.stats.daily_totals[date]
-            item = QTableWidgetItem(f"{daily_total:.1f}")
+            item = QTableWidgetItem(self.fmt(daily_total))
             item.setTextAlignment(AlignCenter)
             item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
             self.table.setItem(0, 2 + col_idx, item)
 
         # 总计列（总总计）
-        grand_total_item = QTableWidgetItem(f"{self.stats.grand_total:.1f}")
+        grand_total_item = QTableWidgetItem(self.fmt(self.stats.grand_total))
         grand_total_item.setTextAlignment(AlignCenter)
         grand_total_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold if PYQT_VERSION == 6 else QFont.Bold))
         self.table.setItem(0, 2 + len(self.stats.all_dates), grand_total_item)
@@ -589,12 +676,12 @@ class StatisticsGUI(QMainWindow):
 
             # 每日费用
             for col_idx, cost in enumerate(daily_costs):
-                item = QTableWidgetItem(f"{cost:.1f}")
+                item = QTableWidgetItem(self.fmt(cost))
                 item.setTextAlignment(AlignCenter)
                 self.table.setItem(row_idx, 2 + col_idx, item)
 
             # 总计
-            item = QTableWidgetItem(f"{total:.1f}")
+            item = QTableWidgetItem(self.fmt(total))
             item.setTextAlignment(AlignCenter)
             self.table.setItem(row_idx, 2 + len(self.stats.all_dates), item)
 
@@ -614,7 +701,7 @@ class StatisticsGUI(QMainWindow):
     def refresh_summary(self):
         """刷新统计摘要"""
         report = StatisticsEngine.generate_report(
-            self.records, self.stats, self.num_to_name
+            self.records, self.stats, self.num_to_name, decimals=self.decimals
         )
         self.summary_text.setPlainText(report)
 
@@ -635,7 +722,7 @@ class StatisticsGUI(QMainWindow):
             total = self.stats.grand_total
             days = len(self.stats.all_dates)
             nums = len(self.stats.num_totals)
-            self.summary_label.setText(f"总费用：{total:.1f} 元 | 统计日期：{days} 天 | 编号数量：{nums} 个")
+            self.summary_label.setText(f"总费用：{self.fmt(total)} 元 | 统计日期：{days} 天 | 编号数量：{nums} 个")
         else:
             if not self.input_path:
                 self.summary_label.setText("未选择费用文件 | 请点击「选择费用文件」按钮")
@@ -798,7 +885,7 @@ class StatisticsGUI(QMainWindow):
 
         # 在每个点上显示数值
         for i, (date, total) in enumerate(zip(date_labels, totals)):
-            ax.annotate(f'{total:.1f}', xy=(date, total), xytext=(0, 10),
+            ax.annotate(f'{total:.{self.decimals}f}', xy=(date, total), xytext=(0, 10),
                        textcoords='offset points', ha='center', fontsize=9)
 
         self.figure.tight_layout()
@@ -844,7 +931,7 @@ class StatisticsGUI(QMainWindow):
         """导出报告到 txt 文件"""
         try:
             report = StatisticsEngine.generate_report(
-                self.records, self.stats, self.num_to_name
+                self.records, self.stats, self.num_to_name, decimals=self.decimals
             )
 
             file_path, _ = QFileDialog.getSaveFileName(
@@ -916,23 +1003,26 @@ class StatisticsGUI(QMainWindow):
             for col in [1, 2]:
                 ws.cell(row=2, column=col).border = thin_border
 
+            # 每日总计的数据格式（随选择的小数位数变化）
+            number_format = f'#,##0.{"0" * self.decimals}' if self.decimals > 0 else '#,##0'
+
             # 写入每日总计数据（各日期列）
             for col_idx, date in enumerate(self.stats.all_dates, start=3):
                 daily_total = self.stats.daily_totals[date]
-                cell = ws.cell(row=2, column=col_idx, value=round(daily_total, 2))
+                cell = ws.cell(row=2, column=col_idx, value=round(daily_total, self.decimals))
                 cell.font = daily_total_font
                 cell.alignment = center_alignment
                 cell.fill = daily_total_fill
                 cell.border = thin_border
-                cell.number_format = '#,##0.00'
+                cell.number_format = number_format
 
             # 总计列（总总计）
-            grand_total_cell = ws.cell(row=2, column=len(headers), value=round(self.stats.grand_total, 2))
+            grand_total_cell = ws.cell(row=2, column=len(headers), value=round(self.stats.grand_total, self.decimals))
             grand_total_cell.font = total_font
             grand_total_cell.alignment = center_alignment
             grand_total_cell.fill = total_fill
             grand_total_cell.border = thin_border
-            grand_total_cell.number_format = '#,##0.00'
+            grand_total_cell.number_format = number_format
 
             # ========== 写入第3行及之后：各编号数据 ==========
             for row_idx, num in enumerate(sorted(self.stats.num_totals.keys()), start=3):
@@ -954,18 +1044,18 @@ class StatisticsGUI(QMainWindow):
 
                 # 每日费用
                 for col_idx, cost in enumerate(daily_costs, start=3):
-                    cost_cell = ws.cell(row=row_idx, column=col_idx, value=round(cost, 2))
+                    cost_cell = ws.cell(row=row_idx, column=col_idx, value=round(cost, self.decimals))
                     cost_cell.font = data_font
                     cost_cell.alignment = center_alignment
                     cost_cell.border = thin_border
-                    cost_cell.number_format = '#,##0.00'
+                    cost_cell.number_format = number_format
 
                 # 总计
-                total_cell = ws.cell(row=row_idx, column=len(headers), value=round(total, 2))
+                total_cell = ws.cell(row=row_idx, column=len(headers), value=round(total, self.decimals))
                 total_cell.font = total_font
                 total_cell.alignment = center_alignment
                 total_cell.border = thin_border
-                total_cell.number_format = '#,##0.00'
+                total_cell.number_format = number_format
 
             # ========== 调整列宽 ==========
             ws.column_dimensions['A'].width = 8   # 编号
@@ -1004,14 +1094,14 @@ class StatisticsGUI(QMainWindow):
             lines.append("\t".join(headers))
 
             # 添加每日总计行
-            daily_total_row = ["每日总计", ""] + [f"{self.stats.daily_totals[date]:.1f}" for date in self.stats.all_dates] + [f"{self.stats.grand_total:.1f}"]
+            daily_total_row = ["每日总计", ""] + [self.fmt(self.stats.daily_totals[date]) for date in self.stats.all_dates] + [self.fmt(self.stats.grand_total)]
             lines.append("\t".join(daily_total_row))
 
             # 添加各编号数据行
             for num in sorted(self.stats.num_totals.keys()):
                 name = self.num_to_name.get(num, f"编号{num}")
-                daily_costs = [f"{self.stats.daily_data[date].get(num, 0.0):.1f}" for date in self.stats.all_dates]
-                total = f"{self.stats.num_totals[num]:.1f}"
+                daily_costs = [self.fmt(self.stats.daily_data[date].get(num, 0.0)) for date in self.stats.all_dates]
+                total = self.fmt(self.stats.num_totals[num])
                 row = [str(num), name] + daily_costs + [total]
                 lines.append("\t".join(row))
 
