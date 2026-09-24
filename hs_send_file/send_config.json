@@ -1,0 +1,19 @@
+{
+  "folder": "C:/Users/Administrator/Desktop/ttttt",
+  "groups": [
+    {
+      "name": "1群",
+      "checked": true
+    },
+    {
+      "name": "2群",
+      "checked": true
+    },
+    {
+      "name": "3群",
+      "checked": true
+    }
+  ],
+  "continue_wait": 0.3,
+  "attach_wait": 1.0
+}

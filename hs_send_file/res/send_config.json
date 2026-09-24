@@ -1,0 +1,47 @@
+{
+  "folder": "C:/Users/Administrator/Desktop/ttttt",
+  "groups": [
+    {
+      "name": "1群",
+      "checked": false
+    },
+    {
+      "name": "2群",
+      "checked": false
+    },
+    {
+      "name": "3群",
+      "checked": false
+    },
+    {
+      "name": "4群",
+      "checked": false
+    },
+    {
+      "name": "5群",
+      "checked": false
+    },
+    {
+      "name": "6群",
+      "checked": false
+    },
+    {
+      "name": "7群",
+      "checked": false
+    },
+    {
+      "name": "8群",
+      "checked": false
+    },
+    {
+      "name": "9群",
+      "checked": false
+    },
+    {
+      "name": "10群",
+      "checked": false
+    }
+  ],
+  "continue_wait": 0.3,
+  "attach_wait": 1.0
+}
